@@ -7,6 +7,10 @@
 #define IN_REG_SIZE 4
 #define WRITE_REG_SIZE 4
 
+unsigned long timeoutDuration = 10000;  // 1 giây timeout
+unsigned long lastRequestTime;
+bool responseReceived = false;
+
 typedef enum {
   ERROR,
   READ_INPUT,
@@ -14,6 +18,12 @@ typedef enum {
   WRITE_COIL,
   WRITE_REGISTER,
 } Func_code_t;
+
+typedef enum {IDLE, 
+WAITING_FOR_RESPONSE,
+PROCESSING_RESPONSE
+} ModbusState;
+ModbusState state = IDLE;
 
 #define ESP32_Addr 0x10
 
@@ -28,9 +38,8 @@ public:
   communication (){
   };
   uint8_t *receive_ptr = nullptr;
-  uint8_t *send_data_ptr = nullptr;
   uart_port_t port;
-
+  size_t len = 0;
   bool get_in (uint8_t *ptr){
     memcpy (ptr, dis_in, IN_SIZE);
     return true;
@@ -136,11 +145,7 @@ bool send (Func_code_t _func, uint8_t *_data, size_t _len){
  * 
  * @return uint8_t 
  */
-uint8_t receive (){
-  size_t len = 0;
-  uart_get_buffered_data_len (my_com.port, &len);
-  
-  if (len > 0){
+uint8_t receive (size_t len){
   my_com.receive_ptr = (uint8_t*) malloc(len);
   uart_read_bytes (my_com.port, my_com.receive_ptr, len, 100/portTICK_RATE_MS);
   uint16_t CRC_received = my_com.receive_ptr [len - 1] << 8 | my_com.receive_ptr [len-2]; 
@@ -151,12 +156,8 @@ uint8_t receive (){
       return len;
     }
     else {
-      handleCRCmismatch ();
+      handleCRCmismatch();
     }
-  }
-  else{
-        return 0;
-      }
     return 0;
 }
 /**
@@ -254,19 +255,43 @@ void handleeror(){
 
 void handleCRCmismatch (){
  uint8_t exception_error = 0x00; //Invalid Function Code
-send(ERROR, &exception_error, 1);
+ send(ERROR, &exception_error, 1);
 }
+
+void handle_Timeout (){
+  uint8_t exception_error = 0x02; //Timeout
+  send(ERROR, &exception_error, 1);
+} 
+
 void setup() {
 uart_init(UART_NUM_0, 9600, 1, 3, 256);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-uint8_t len = receive ();
-
-if (len > 0) {
-  decoder(my_com.receive_ptr, len);
-  vTaskDelay (100/portTICK_PERIOD_MS);
-  free(my_com.receive_ptr);
-}
+uint8_t abc [2] = {0xCD,0xCA};
+switch (state){
+  case IDLE:
+    send (READ_REGISTER, abc, 1);
+    state = WAITING_FOR_RESPONSE;
+    lastRequestTime = millis();
+    break;
+  case WAITING_FOR_RESPONSE:
+    uart_get_buffered_data_len (my_com.port, &my_com.len);
+    if (my_com.len > 0) {
+      state = PROCESSING_RESPONSE;
+    }
+    else if (millis() - lastRequestTime > timeoutDuration){
+      handle_Timeout ();
+      state = IDLE;
+    }
+    break;
+  case PROCESSING_RESPONSE:
+    receive(my_com.len);
+    decoder(my_com.receive_ptr, my_com.len);
+    vTaskDelay (100/portTICK_PERIOD_MS);
+    free(my_com.receive_ptr);
+    state = IDLE;
+    break;
+  }
 }
